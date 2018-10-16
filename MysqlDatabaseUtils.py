@@ -46,10 +46,7 @@ class CDisrupShotsMySqlProccessor():
                                cursorclass=pymysql.cursors.DictCursor)
     
     '''
-    Connect to mysql database
-    This method will be called when creating the class instance
-    But the connection might be closed if there is no opertion for a long time
-    If so, call this method to connect again
+    This method get parameters of a shot and writes them into the mysql database
     input:   ShotNum: The unique id for each shot
              bValid: If the data should be used in the training dataset
              ReasonForNotValid: Why the data is not used. Will be an empty string
@@ -99,10 +96,8 @@ class CDisrupShotsMySqlProccessor():
             self.Conn.commit()
     
     '''
-    Connect to mysql database
-    This method will be called when creating the class instance
-    But the connection might be closed if there is no opertion for a long time
-    If so, call this method to connect again
+    This method find the data of the selected shot number. Then edit the selected
+    parameter with the new value
     input:   ShotNum: The unique id for each shot
              Device: Which device is the data belongs to, HL2A, EAST or JTEXT
              **ParamDictToReWrite: This input will content all the params (keys
@@ -151,8 +146,8 @@ class CDisrupShotsMySqlProccessor():
         self.Conn.commit()
     
     '''
-    This method goes to the table of the selected device and delete the data of
-    selected shot number
+    This method goes to the table of the selected device and get all the shot 
+    number which satisfies the given condition
     input:   ShotNum: the shot number of the data you want
              Device: the device which the data belongs to
     output: none
