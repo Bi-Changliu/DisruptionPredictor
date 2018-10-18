@@ -1,5 +1,4 @@
-# author:huangyao
-# email: hyao666@foxmail.com
+# author:yellowyellowyao
 from __future__ import print_function
 import h5py
 import numpy as np
