@@ -1,6 +1,5 @@
 function [Time, output] = read_hdf5(device,shot_number,channel )
-% author:huangyao
-% email: hyao666@foxmail.com
+% author:yellowyellowyao
 dir_name = fix(shot_number / 200) * 200;
 hl2a = {'HL-2A', 'HL2A', '2A'};
 jtext = {'J-TEXT', 'JTEXT'};
@@ -9,7 +8,7 @@ device = upper(device);
 
 Time=0;
 output=0;
-% ¼ÓÔØhdf5ÎÄ¼þ
+% Â¼Ã“Ã”Ã˜hdf5ÃŽÃ„Â¼Ã¾
 hinfo = false;
 try    
     if strcmpi(device,hl2a(1)) || strcmpi(device, hl2a(2)) || strcmpi(device,hl2a(3))
