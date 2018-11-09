@@ -8,8 +8,8 @@ This file controls the training
 import os
 import numpy as np
 import tensorflow as tf
-import CInputReader
 import ModelBuilder
+import TfRecordReader
 from SettingsFile import SettingsDict
 
 #InputConf
@@ -40,36 +40,70 @@ TrainDevice=SettingsDict['TrainParamDict']['Device']
 TestDevice=SettingsDict['TestParamDict']['Device']
 DeviceList=[TrainDevice,TestDevice]
 DeviceList=list(set(DeviceList))
-InputReader=CInputReader.CInputReader(DeviceList)
 
 GpuNum=SettingsDict['TrainParamDict']['GpuNum']
 DisrupRatio=SettingsDict['TrainParamDict']['DisrupRatio']
 
 tf.reset_default_graph()
-with tf.Session() as Sess:
-    All0DSignals=tf.placeholder(tf.float32, 
-                                [BatchForOneTime, MinDataLen, SettingsDict['InputParamDict']['0DSignalNum']], 
-                                name='All0DSignals')
-    StoredEnergy=tf.placeholder(tf.float32, 
-                                [BatchForOneTime, MinDataLen, SettingsDict['InputParamDict']['SignalDict']['StoredEnergy']['FreqDoub']], 
-                                name='All0DSignals')
-    Ne_R0=tf.placeholder(tf.float32, 
-                                [BatchForOneTime, MinDataLen, SettingsDict['InputParamDict']['SignalDict']['Ne_R0']['FreqDoub']], 
-                                name='All0DSignals')
-    EmergencyValue=tf.placeholder(tf.int64, 
-                                  [BatchForOneTime, MinDataLen], 
-                                  name='EmergencyValue')
-
-    StoredEnergyCNNOutput,StoredEnergyDropoutProb = ModelBuilder.CNNForStoredEnergy(StoredEnergy, IsTraining=True)
-    Ne_R0CNNOutput,Ne_R0DropoutProb = ModelBuilder.CNNForNe_R0(Ne_R0, IsTraining=True)
+with tf.Session(config=tf.ConfigProto(allow_soft_placement=True, log_device_placement=True)) as Sess:
+    DropoutProb = tf.placeholder(tf.float32, name='DropoutProb')
     
-    AllSignals = tf.concat([All0DSignals,StoredEnergyCNNOutput,Ne_R0CNNOutput],2,name='AllSignals')
+    TrainInputBatch,TrainEmergencyValue=TfRecordReader.ReadAndDecodeTfRecords('Train',BatchForOneTime)
+    ValInputBatch,ValEmergencyValue=TfRecordReader.ReadAndDecodeTfRecords('Val',BatchForOneTime)
+    bValidation=tf.Variable(False)
+    EmergencyValue3D = tf.cond(bValidation, lambda: tf.identity(TrainEmergencyValue), lambda: tf.identity(ValEmergencyValue))
+    EmergencyValue = tf.reshape(EmergencyValue3D,[BatchForOneTime,MinDataLen])
+    TrainAll0DSignals = TrainInputBatch['0DSignals']
+    ValAll0DSignals = ValInputBatch['0DSignals']
+    All0DSignals = tf.cond(bValidation, lambda: tf.identity(TrainAll0DSignals), lambda: tf.identity(ValAll0DSignals))
+    TrainStoredEnergy = TrainInputBatch['StoredEnergy']
+    ValStoredEnergy = ValInputBatch['StoredEnergy']
+    StoredEnergy = tf.cond(bValidation, lambda: tf.identity(TrainStoredEnergy), lambda: tf.identity(ValStoredEnergy))
+    TrainNe_R0 = TrainInputBatch['Ne_R0']
+    ValNe_R0 = ValInputBatch['Ne_R0']
+    Ne_R0 = tf.cond(bValidation, lambda: tf.identity(TrainNe_R0), lambda: tf.identity(ValNe_R0))
+    TrainMir_Pol_A = TrainInputBatch['Mir_Pol_A']
+    ValMir_Pol_A = ValInputBatch['Mir_Pol_A']
+    Mir_Pol_A = tf.cond(bValidation, lambda: tf.identity(TrainMir_Pol_A), lambda: tf.identity(ValMir_Pol_A))
     
-    RNNOutput,RNNDropoutProb=ModelBuilder.RNNForAllSignals(AllSignals)
+    All0DSignalsSplits=tf.split(All0DSignals,GpuNum)
+    StoredEnergySplits=tf.split(StoredEnergy,GpuNum)
+    Ne_R0Splits=tf.split(Ne_R0,GpuNum)
+    Mir_Pol_ASplits=tf.split(Mir_Pol_A,GpuNum)
+    EmergencyValueSplits=tf.split(EmergencyValue,GpuNum)
+    MeanSquaredErrorTower=[]
+    RNNOutputMeanTower=[]
+    Ne_R0CNNOutputMeanTower=[]
+    
+    with tf.variable_scope(tf.get_variable_scope()):
+        for GpuIndex in range(GpuNum):
+            with tf.device('/GPU:%s' % GpuIndex):
+                StoredEnergyCNNOutput = ModelBuilder.CNNForStoredEnergy(StoredEnergySplits[GpuIndex], DropoutProb, IsTraining=True)
+                Ne_R0CNNOutput = ModelBuilder.CNNForNe_R0(Ne_R0Splits[GpuIndex], DropoutProb, IsTraining=True)
+                Mir_Pol_ACNNOutput = ModelBuilder.CNNForMir_Pol_A(Mir_Pol_ASplits[GpuIndex], DropoutProb, IsTraining=True)
+                
+                AllSignalsSplits = tf.concat([All0DSignalsSplits[GpuIndex],
+                                              StoredEnergyCNNOutput,
+                                              Ne_R0CNNOutput,
+                                              Mir_Pol_ACNNOutput,
+                                              ],2,name='AllSignalsSplits')
+                
+                RNNOutput=ModelBuilder.RNNForAllSignals(AllSignalsSplits ,DropoutProb)
+                
+                MeanSquaredErrorSplit = tf.losses.mean_squared_error(EmergencyValueSplits[GpuIndex], RNNOutput)
+                RNNOutputMeanSplit = tf.reduce_mean(RNNOutput)
+                Ne_R0CNNOutputMeanSplit = tf.reduce_mean(Ne_R0CNNOutput)
+                
+                MeanSquaredErrorTower.append(MeanSquaredErrorSplit)
+                RNNOutputMeanTower.append(RNNOutputMeanSplit)
+                Ne_R0CNNOutputMeanTower.append(Ne_R0CNNOutputMeanSplit)
+                tf.get_variable_scope().reuse_variables()
     
     # Create the back propagation and training evaluation machinery in the graph.
     with tf.name_scope('MeanSquaredError'):
-        MeanSquaredError = tf.losses.mean_squared_error(EmergencyValue,RNNOutput)
+        MeanSquaredError=tf.reduce_mean(MeanSquaredErrorTower)
+        RNNOutputMean=tf.reduce_mean(RNNOutputMeanTower)
+        Ne_R0CNNOutputMean=tf.reduce_mean(Ne_R0CNNOutputMeanTower)
     tf.summary.scalar('MeanSquaredError', MeanSquaredError)
     with tf.name_scope('train'), tf.control_dependencies([]):
         LearningRate = tf.placeholder(
@@ -87,6 +121,8 @@ with tf.Session() as Sess:
     ValidationWriter=tf.summary.FileWriter(SummariesDir+'/validation')
     
     tf.global_variables_initializer().run()
+    Coord=tf.train.Coordinator()
+    Threads=tf.train.start_queue_runners(sess=Sess, coord=Coord)
     StartStep=1
     if StartCheckpoint:
         ModelBuilder.load_variables_from_checkpoint(Sess, StartCheckpoint)
@@ -109,50 +145,37 @@ with tf.Session() as Sess:
             LearningRateInput = LearningRateList[i-1]
         else:
             LearningRateInput = LearningRateMin+(LearningRateMax-LearningRateMin)*np.exp(-EpochIndex/DecaySpeed)
-            
-        Data,EmergencyValueInput=InputReader.ReadBatchData(BatchForOneTime,DisrupRatio,TrainDevice)
 
         # Pull the audio samples we'll use for training.
-        TrainSummary, TrainError, _, _ = Sess.run(
+        TrainSummary, TrainError, TrainRNNOutputMean, TrainNe_R0CNNOutputMean ,_, _ = Sess.run(
             [
-                MergedSummaries, MeanSquaredError, TrainStep,
+                MergedSummaries, MeanSquaredError, RNNOutputMean, Ne_R0CNNOutputMean, TrainStep,
                 IncrementGlobalStep
             ],
             feed_dict={
-                All0DSignals            : Data['0DSignals'],
-                StoredEnergy            : Data['StoredEnergy'],
-                Ne_R0                   : Data['Ne_R0'],
-                EmergencyValue          : EmergencyValueInput,
                 LearningRate            : LearningRateInput,
-                StoredEnergyDropoutProb : 0.5,
-                Ne_R0DropoutProb        : 0.5,
-                RNNDropoutProb          : 0.5
+                DropoutProb             : 0.5,
             })
         TrainWriter.add_summary(TrainSummary, EpochIndex)
-        tf.logging.info('Step #%d: rate %f, error %.1f' %
-                    (EpochIndex, LearningRateInput, TrainError))
+        tf.logging.info('Step #%d: rate %f, error %.1f, outputmean %d, outputmean2 %f' %
+                    (EpochIndex, LearningRateInput, TrainError,
+                     TrainRNNOutputMean,TrainNe_R0CNNOutputMean))
         IsLastEpoch=(EpochIndex==EpochNum)
         
         #经过一定的training step就validate一次
         if (EpochIndex % EvalStepInterval)==0 or IsLastEpoch:
             AvgError = 0
             for i in range(0, ValBatchSize, BatchForOneTime):
-                Data,EmergencyValueInput=InputReader.ReadBatchData(BatchForOneTime,DisrupRatio,TrainDevice)
-                ValSummary, ValError = Sess.run(
-                    [MergedSummaries, MeanSquaredError],
+                ValSummary, ValError, ValRNNOutputMean = Sess.run(
+                    [MergedSummaries, MeanSquaredError, RNNOutputMean],
                     feed_dict={
-                        All0DSignals            : Data['0DSignals'],
-                        StoredEnergy            : Data['StoredEnergy'],
-                        Ne_R0                   : Data['Ne_R0'],
-                        EmergencyValue          : EmergencyValueInput,
-                        StoredEnergyDropoutProb : 1.0,
-                        Ne_R0DropoutProb        : 1.0,
-                        RNNDropoutProb          : 1.0
+                        DropoutProb : 1.0,
                     })
-                AvgError += (ValError*BatchForOneTime)/TestBatchSize
+                AvgError += (ValError*BatchForOneTime)/ValBatchSize
             ValidationWriter.add_summary(ValSummary, EpochIndex)
-            tf.logging.info('Step %d: Validation error = %.1f%% (N=%d)' %
-                      (EpochIndex, AvgError, ValBatchSize))
+            tf.logging.info('Step %d: Validation error = %.1f (N=%d), outputmean %d' %
+                      (EpochIndex, AvgError, ValBatchSize,
+                     ValRNNOutputMean))
             
         # Save the model checkpoint periodically.
         if (EpochIndex % SaveStepInterval == 0 or IsLastEpoch):
@@ -163,19 +186,14 @@ with tf.Session() as Sess:
     tf.logging.info('set_size=%d', TestBatchSize)
     AvgError = 0
     for i in range(0, TestBatchSize, BatchForOneTime):
-        Data,EmergencyValueInput=InputReader.ReadBatchData(BatchForOneTime,DisrupRatio,TrainDevice)
         TestSummary, TestError = Sess.run(
             [MergedSummaries, MeanSquaredError],
             feed_dict={
-                All0DSignals            : Data['0DSignals'],
-                StoredEnergy            : Data['StoredEnergy'],
-                Ne_R0                   : Data['Ne_R0'],
-                EmergencyValue          : EmergencyValueInput,
-                StoredEnergyDropoutProb : 1.0,
-                Ne_R0DropoutProb        : 1.0,
-                RNNDropoutProb          : 1.0
+                DropoutProb : 1.0,
             })
         AvgError += (TestError*BatchForOneTime)/TestBatchSize
-    tf.logging.info('Final test error = %.1f%% (N=%d)' % (AvgError,
+    tf.logging.info('Final test error = %.1f (N=%d)' % (AvgError,
                                                            TestBatchSize))
+    Coord.request_stop()
+    Coord.join(Threads)
     Sess.close()
