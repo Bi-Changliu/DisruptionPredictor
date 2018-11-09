@@ -23,8 +23,8 @@ class CDisrupShotsMySqlProccessor():
     '''
     def __init__(self):
         self.dbConfig={'host':'192.168.9.222',
-                       'user':'',
-                       'password':''}
+                       'user':'zyyang',
+                       'password':'123456'}
         self.DbName='fusion-ai'
         self.TableName='disruption_param_'
         self.ConnectToMySql()

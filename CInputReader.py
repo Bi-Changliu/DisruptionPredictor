@@ -60,7 +60,11 @@ class CInputReader(object):
             DataList[Idx]['0DSignals']=list()
         for SignalName in self.SignalDict.keys():
             SubDir = self.SignalDict[SignalName]['SubDir']
-            Signal = DataPipe[SubDir][SignalName]
+            SubDir1 = self.SignalDict[SignalName]['SubDir1']
+            if SubDir1 is None:
+                Signal = DataPipe[SubDir][SignalName]
+            else:
+                Signal = DataPipe[SubDir][SubDir1][SignalName]
             for (Idx,TimeIdx) in enumerate(range(int(self.Fs*TStart),int(self.Fs*TStop))):
                 if self.SignalDict[SignalName]['ChannelNum']==1:
                     if self.SignalDict[SignalName]['FreqDoub']==1:
